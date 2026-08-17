@@ -13,6 +13,7 @@ OpenAqua documents the exploits, tweaks, and detection mechanisms discovered whi
 3. [Tweaks](#tweaks)
 4. [Hash Detection](#hash-detection)
 5. [Container Manager API](#container-manager-api)
+6. [Filza: File Browsing](#filza-file-browsing)
 
 ---
 
@@ -472,3 +473,50 @@ This is a documentation-only repository. If you find new tweaks, exploits, or de
 ## License
 
 MIT — use this information however you want.
+
+---
+
+## Filza: File Browsing
+
+### Overview
+
+A basic file browser can be added to iOS apps using `fsgetpath` (from bad_query) and the ContainerManager API. However, the sandbox restricts which directories can be enumerated.
+
+### Working Paths (fsgetpath succeeds)
+
+| Path | Description | Notes |
+|------|-------------|-------|
+| `/var/mobile` | Mobile user directory | Works via fsgetpath |
+| `/var/mobile/Containers/Data/Application` | App containers | Works, 200+ entries |
+| `/var/mobile/Containers/Shared/AppGroup` | App group containers | Works, 100+ entries |
+| `/var/containers/Shared/SystemGroup` | System group containers | Works with fallback to known paths |
+| `/var/mobile/Containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches` | MobileGestalt cache | Always works |
+| `/var/Managed Preferences/mobile` | Managed preferences | Works via fsgetpath |
+
+### Blocked Paths (sandbox restriction)
+
+| Path | Reason |
+|------|--------|
+| `/var/containers/Shared/SystemGroup` (direct enumeration) | Sandbox blocks enumeration |
+| `/private/var/mobile/Library/Preferences` | Sandbox blocks access |
+| Most system paths outside sandbox | ContainerManager restrictions |
+
+### System Groups Workaround
+
+System Groups (`/var/containers/Shared/SystemGroup`) returns nil from fsgetpath because the sandbox blocks enumeration. The workaround:
+
+1. Try fsgetpath first — if it returns entries, use them
+2. If nil, try bad_query with class 13 on known paths inside SystemGroup
+3. Fall back to the MobileGestalt cache path (which always works)
+
+This allows browsing SystemGroup subdirectories even though direct enumeration is blocked.
+
+### Plist File Display
+
+Plist files (`.plist`) can be displayed as readable XML:
+1. Read the file as `Data`
+2. Parse with `PropertyListSerialization.propertyList(from:format:)`
+3. Serialize back to XML with `PropertyListSerialization.data(fromPropertyList:format:options:)`
+4. Display as text
+
+Binary plists are automatically converted to readable XML format.
