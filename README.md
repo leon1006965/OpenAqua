@@ -1,6 +1,6 @@
 # OpenAqua
 
-**Open-source documentation for iOS 27 MobileGestalt customization and PosterBoard exploit research.**
+**Open-source documentation for iOS 27 MobileGestalt customization, PosterBoard exploits, and respring mechanisms.**
 
 OpenAqua documents the exploits, tweaks, and detection mechanisms discovered while building Aqua — an iOS 27 MobileGestalt editor. This repository contains no source code. It is a reference for developers building similar tools.
 
@@ -9,8 +9,10 @@ OpenAqua documents the exploits, tweaks, and detection mechanisms discovered whi
 ## Table of Contents
 
 1. [Exploits](#exploits)
-2. [Tweaks](#tweaks)
-3. [Hash Detection](#hash-detection)
+2. [Respring Mechanism](#respring-mechanism)
+3. [Tweaks](#tweaks)
+4. [Hash Detection](#hash-detection)
+5. [Container Manager API](#container-manager-api)
 
 ---
 
@@ -18,10 +20,11 @@ OpenAqua documents the exploits, tweaks, and detection mechanisms discovered whi
 
 ### Overview
 
-iOS 27 uses a sandbox system managed by `containermanagerd` (the ContainerManager daemon). Apps run in sandboxed containers and cannot access files outside their container without a sandbox extension. Two exploits allow bypassing this restriction:
+iOS 27 uses a sandbox system managed by `containermanagerd` (the ContainerManager daemon). Apps run in sandboxed containers and cannot access files outside their container without a sandbox extension. Multiple exploits allow bypassing this restriction:
 
 1. **bad_query** — ContainerManager path traversal via `container_query` APIs
 2. **.Trash symlink** — Sandbox bypass via `trashItemAtURL` through a symlink
+3. **fsgetpath enumeration** — Directory listing via inode scanning
 
 ---
 
@@ -88,6 +91,10 @@ The `create` parameter in the C function skips the `lstat` existence check. With
 - For **detection** of container UUIDs, use class 13 (no groupIdentifier) — it traverses from MobileGestalt to any path
 - For **writing** to containers, use class 7 with the container UUID
 
+**Limitations:**
+
+bad_query can only access MobileGestalt's container (class 13) and specific app containers (class 7). It cannot access arbitrary system paths like `/var/mobile` — the path traversal is hardcoded for MobileGestalt's cache directory location.
+
 ---
 
 ### Exploit 2: .Trash Symlink (Sandbox Bypass)
@@ -112,6 +119,8 @@ Creates a symbolic link from `Documents/.Trash` to the target directory, then us
 
 The sandbox blocks raw `symlink()` calls. However, `FileManager.default.createSymbolicLink(at:withDestinationURL:)` uses a different code path that may bypass this restriction on certain iOS versions.
 
+**Known limitation:** Even with FileManager's `createSymbolicLink`, the sandbox may still block listing through the symlink. The `trashItemAtURL` method is what actually writes through the symlink.
+
 ---
 
 ### Exploit 3: fsgetpath Enumeration
@@ -132,6 +141,77 @@ fsgetpath(buf, buflen, &fsid, ino)
 - Enumerates inodes 1 through max (typically 2,000,000)
 - Returns full paths for each inode
 - Filter results by prefix to get children of a specific directory
+
+**Limitations:**
+
+`fsgetpath` can enumerate directories, but the sandbox blocks reading files through the enumerated paths. It works for listing but not for accessing file contents.
+
+---
+
+## Respring Mechanism
+
+### Overview
+
+On iOS, a "respring" restarts the SpringBoard process (the home screen and UI manager) without rebooting the entire device. This is needed after applying MobileGestalt tweaks for them to take effect.
+
+### Method: WebKit GPU Crash
+
+**Source:** [rooootdev/mond](https://github.com/rooootdev/mond) (via neonmodder123)
+
+**Mechanism:**
+
+Loads a malicious HTML page in a `WKWebView` that consumes excessive GPU memory through backdrop filters, causing SpringBoard to crash and restart.
+
+**Implementation:**
+
+1. Create a `WKWebView` with JavaScript enabled
+2. Load HTML containing:
+   - 500 `<div>` elements with `backdrop-filter: blur(100px)` and extreme transforms
+   - A `setInterval` that calls `navigator.share()` and generates large random data continuously
+3. The GPU compositing of 500 blurred layers consumes all available memory
+4. SpringBoard (which manages the GPU) crashes and restarts
+
+**Key HTML:**
+```javascript
+const container = document.createElement('div');
+container.style.cssText = 'perspective:1px; perspective-origin: 9999999% 9999999%;';
+document.body.appendChild(container);
+for (let i = 0; i < 500; i++) {
+    let d = document.createElement('div');
+    d.style.cssText = 'position:absolute; width:100vw; height:100vh; backdrop-filter:blur(100px); transform:translate3d(100000px,100000px,'+i+'px) rotateY(90deg);';
+    container.appendChild(d);
+}
+setInterval(() => {
+    navigator.share({title:'R', text:'R'.repeat(100000)}).catch(() => {});
+    crypto.getRandomValues(new Uint8Array(1024*1024*10));
+}, 0);
+```
+
+**Swift Implementation:**
+
+```swift
+struct RespringView: UIViewRepresentable {
+    func makeUIView(context: Context) -> WKWebView {
+        let webView = WKWebView()
+        WKWebpagePreferences().allowsContentJavaScript = true
+        return webView
+    }
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        webView.loadHTMLString(crashHTML, baseURL: URL(string: "about:blank"))
+    }
+}
+```
+
+**Display:** Add the `RespringView` as an overlay in SwiftUI. When `showRespring` is true, it appears as a black screen covering the entire display, triggering the GPU crash.
+
+**When to respring:**
+- After applying MobileGestalt tweaks (CacheExtra changes)
+- After restoring a backup
+- After writing PosterBoard descriptors
+
+**When NOT to respring:**
+- Changes that only modify CacheData (like iPadOS mode) need a full reboot, not respring
+- Some tweaks like Dynamic Island subtype may need reboot for full effect
 
 ---
 
@@ -310,6 +390,78 @@ Once you have the UUID, PosterBoard's wallpaper data is at:
 ```
 
 Where `extensionID` is typically `com.apple.WallpaperKit.CollectionsPoster` for lock screen wallpapers.
+
+---
+
+## Container Manager API
+
+### Overview
+
+The ContainerManager daemon (`containermanagerd`) manages all app containers on iOS. It provides APIs for querying containers, obtaining sandbox extensions, and managing container metadata.
+
+### FilzaSlop's Extended API
+
+FilzaSlop ([0xjohnnydev/FilzaSlop](https://github.com/0xjohnnydev/FilzaSlop)) provides a more complete ContainerManager API than the basic bad_query PoC:
+
+```c
+container_query_create()                           // Create query
+container_query_set_class(query, class)            // Set container class
+container_query_set_identifiers(query, id)         // Set identifier (for app containers)
+container_query_set_group_identifiers(query, id)   // Set group identifier (for system groups)
+container_query_operation_set_flags(query, flags)  // Set operation flags
+container_query_operation_set_part(query, part)    // Set traversal part
+container_query_operation_set_part_domain(query, p) // Set traversal path
+container_query_get_single_result(query)           // Get single result
+container_query_get_last_error(query)              // Get error info
+container_query_iterate_results_sync(query, block) // Iterate all results
+container_query_free(query)                        // Free query
+container_object_get_path(object)                  // Get path from object
+container_object_get_identifier(object)            // Get identifier from object
+container_object_copy(object)                      // Copy object
+container_copy_sandbox_token(object)               // Get sandbox token
+container_object_sandbox_extension_activate(obj, f) // Activate sandbox extension
+container_object_free(object)                      // Free object
+container_error_get_posix_errno(error)             // Get POSIX error
+container_error_get_message(error)                 // Get error message
+```
+
+### Container Classes (FilzaSlop)
+
+| Class | Name | Purpose |
+|-------|------|---------|
+| 2 | `MCMAppDataContainer` | Regular app data containers |
+| 7 | `MCMSharedDataContainer` | Shared data and app groups |
+| 10 | Unknown | Used for `com.apple.lsd` |
+| 13 | `MCMSharedSystemDataContainer` | System groups (MobileGestalt) |
+
+### Key Difference: setIdentifiers vs setGroupIdentifiers
+
+For **system groups** (class 13): use `container_query_set_group_identifiers`
+For **app containers** (class 2/7): use `container_query_set_identifiers`
+
+This is the critical difference between bad_query (which only uses `setGroupIdentifiers`) and FilzaSlop (which uses `setIdentifiers` for app containers).
+
+### Operation Flags
+
+| Flag | Hex | Purpose |
+|------|-----|---------|
+| Metadata-only | `0x100000000ULL` | Read-only, no creation |
+| Read-write | `0x8100000000ULL` | Full access |
+| Standard MG | `0x0000008000000000ULL` | MobileGestalt access |
+| iOS 26 AppGroup | `0x0000000800000000ULL` | App Group access |
+
+### Sandbox Escape (FilzaSlop)
+
+FilzaSlop includes a kernel-level sandbox escape that provides full read/write filesystem access:
+
+```c
+// Walk: proc_ro → ucred → cr_label → sandbox → ext_set → ext_table
+// Patch extension paths to "/"
+// Rewrite class to "com.apple.app-sandbox.read-write"
+// Fill all 16 hash slots → full R+W access
+```
+
+This is more powerful than bad_query but requires a kernel exploit.
 
 ---
 
