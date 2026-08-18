@@ -96,6 +96,26 @@ The `create` parameter in the C function skips the `lstat` existence check. With
 
 bad_query can only access MobileGestalt's container (class 13) and specific app containers (class 7). It cannot access arbitrary system paths like `/var/mobile` — the path traversal is hardcoded for MobileGestalt's cache directory location.
 
+**Supported Paths (from bad_query README):**
+
+```
+iOS 27:
+  /var/containers/Data/System                    ← NEW: system data
+  /var/containers/Shared/SystemGroup/*           ← WILDCARD: any SystemGroup
+  /var/mobile/Containers/Data/Application/*      ← app containers
+  /var/mobile/Containers/Data/InternalDaemon/*   ← internal daemons
+  /var/mobile/Containers/Data/PluginKitPlugin/*  ← plugins
+  /var/mobile/Containers/Shared/AppGroup         ← app groups
+
+iOS 26:
+  /var/mobile/Containers/Data/Application/*      ← app containers
+  /var/mobile/Containers/Data/InternalDaemon/*   ← internal daemons
+  /var/mobile/Containers/Data/PluginKitPlugin/*  ← plugins
+  /var/mobile/Containers/Shared/AppGroup/*       ← requires App Group sacrifice
+```
+
+**Key insight:** On iOS 27, `/var/containers/Shared/SystemGroup/*` is a **wildcard** — bad_query can reach ANY SystemGroup, not just MobileGestalt. This opens up access to other system-managed data stores beyond what was previously thought possible.
+
 ---
 
 ### Exploit 2: .Trash Symlink (Sandbox Bypass)
